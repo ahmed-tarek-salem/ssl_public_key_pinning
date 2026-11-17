@@ -1,6 +1,7 @@
-import 'package:dio/dio.dart';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
-import 'package:ssl_public_key_pinning_dio/ssl_public_key_pinning_dio.dart';
+import 'package:ssl_public_key_pinning/ssl_public_key_pinning.dart';
 
 void main() => runApp(const DemoApp());
 
@@ -36,13 +37,24 @@ class _DemoPageState extends State<DemoPage> {
     setState(() => _log.add(_LogLine(text, error: error, dim: dim)));
   }
 
-  Dio _dioWithPin(String pin) => Dio()
-    ..httpClientAdapter = PublicKeyPinningAdapter(PublicKeyPinning(
-      pins: {
-        _host: [pin],
-      },
-      observer: (event) => _append('observer: $event', dim: true),
-    ));
+  PublicKeyPinning _pinningWith(String pin) => PublicKeyPinning(
+        pins: {
+          _host: [pin],
+        },
+        observer: (event) => _append('observer: $event', dim: true),
+      );
+
+  Future<int> _get(PublicKeyPinning pinning, Uri url) async {
+    final client = pinning.createPinnedHttpClient();
+    try {
+      final request = await client.getUrl(url);
+      final response = await request.close();
+      await response.drain<void>();
+      return response.statusCode;
+    } finally {
+      client.close(force: true);
+    }
+  }
 
   Future<void> _run(String label, Future<void> Function() action) async {
     if (_busy) return;
@@ -67,33 +79,32 @@ class _DemoPageState extends State<DemoPage> {
   Future<void> _correctPin() =>
       _run('GET https://$_host/ with the CORRECT pin', () async {
         final pin = await fetchPinOf(_host, 443);
-        final res = await _dioWithPin(pin).get<dynamic>('https://$_host/');
-        _append('HTTP ${res.statusCode}: pinned request succeeded');
+        final status = await _get(_pinningWith(pin), Uri.https(_host, '/'));
+        _append('HTTP $status: pinned request succeeded');
       });
 
   Future<void> _wrongPinRequest() =>
       _run('GET https://$_host/ with a WRONG pin', () async {
         try {
-          await _dioWithPin(_wrongPin).get<dynamic>('https://$_host/');
+          await _get(_pinningWith(_wrongPin), Uri.https(_host, '/'));
           _append('UNEXPECTED: wrong pin was accepted', error: true);
-        } on DioException catch (e) {
-          if (e.type == DioExceptionType.badCertificate) {
-            _append('rejected fail-closed before any byte was sent:');
-            _append('${e.error}', error: true);
-          } else {
-            rethrow;
-          }
+        } on HandshakeException {
+          _append('rejected fail-closed before any byte was sent');
         }
       });
 
   Future<void> _unpinnedHost() =>
-      _run('GET https://example.com/ (unpinned host)', () async {
-        // Same Dio instance style, pins only cover _host. example.com is
-        // routed to the inner CA-validated adapter automatically.
-        final res =
-            await _dioWithPin(_wrongPin).get<dynamic>('https://example.com/');
-        _append('HTTP ${res.statusCode}: passed through normal '
-            'CA validation (no pin applied)');
+      _run('GET https://example.com/ (no pins for this host)', () async {
+        // The raw pinned client trusts nothing but the pins, so a host
+        // without pins is refused. The dio and http bindings route such
+        // hosts to normal CA validation instead.
+        try {
+          await _get(_pinningWith(_wrongPin), Uri.https('example.com', '/'));
+          _append('UNEXPECTED: unpinned host was accepted', error: true);
+        } on HandshakeException {
+          _append('refused fail-closed: the pinned client only talks to '
+              'pinned hosts');
+        }
       });
 
   @override
