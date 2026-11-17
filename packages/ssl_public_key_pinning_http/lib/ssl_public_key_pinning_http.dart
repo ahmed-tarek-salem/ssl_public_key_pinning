@@ -87,7 +87,7 @@ class PublicKeyPinningClient extends http.BaseClient {
       hops++;
       await response.stream.drain<void>();
 
-      final next = url.resolveUri(Uri.parse(location));
+      final next = _resolveRedirect(url, location);
       if ({301, 302, 303}.contains(response.statusCode) &&
           method != 'GET' &&
           method != 'HEAD') {
@@ -105,6 +105,20 @@ class PublicKeyPinningClient extends http.BaseClient {
       }
       url = next;
     }
+  }
+
+  Uri _resolveRedirect(Uri from, String location) {
+    final Uri next;
+    try {
+      next = from.resolveUri(Uri.parse(location));
+    } on FormatException {
+      throw http.ClientException('Invalid redirect Location header', from);
+    }
+    if (next.scheme != 'http' && next.scheme != 'https') {
+      throw http.ClientException(
+          "Refusing redirect to unsupported scheme '${next.scheme}'", from);
+    }
+    return next;
   }
 
   @override

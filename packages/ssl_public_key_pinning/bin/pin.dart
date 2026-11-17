@@ -10,7 +10,7 @@ Future<void> main(List<String> args) async {
   }
   final host = args[0];
   final port = args.length == 2 ? int.tryParse(args[1]) : 443;
-  if (port == null) {
+  if (port == null || port < 1 || port > 65535) {
     stderr.writeln('Invalid port: ${args[1]}');
     exitCode = 64;
     return;

@@ -240,4 +240,53 @@ void main() {
     expect(res.realUri.path, '/ok');
     dio.close();
   });
+
+  test('18. trailing-dot form of a pinned host is still pin-checked', () async {
+    final bad = dioWith([wrongPin]);
+    await expectLater(
+        bad.getUri<String>(pinnedServer.uri('localhost.', '/ok')),
+        throwsA(isA<DioException>().having(
+            (e) => e.error, 'error', isA<PublicKeyPinningException>())));
+    bad.close();
+
+    final good = dioWith([correctPin]);
+    final res =
+        await good.getUri<String>(pinnedServer.uri('localhost.', '/ok'));
+    expect(res.data, 'ok');
+    good.close();
+  });
+
+  test('19. redirect to the trailing-dot form re-applies the pin', () async {
+    final target = pinnedServer.uri('localhost.', '/ok').toString();
+    final dio = dioWith([wrongPin]);
+    await expectLater(
+        dio.getUri<String>(plainServer
+            .uri('127.0.0.1', '/redirect', {'code': '302', 'to': target})),
+        throwsA(isA<DioException>().having(
+            (e) => e.error, 'error', isA<PublicKeyPinningException>())));
+    dio.close();
+  });
+
+  test('20. malformed Location is a badResponse DioException', () async {
+    final dio = dioWith([correctPin]);
+    await expectLater(
+        dio.getUri<String>(pinnedServer.uri(
+            'localhost', '/redirect', {'code': '302', 'to': 'http://a:xx/'})),
+        throwsA(isA<DioException>()
+            .having((e) => e.type, 'type', DioExceptionType.badResponse)));
+    dio.close();
+  });
+
+  test('21. redirect to a non-http(s) scheme is refused', () async {
+    final dio = dioWith([correctPin]);
+    for (final to in ['data:text/plain,hi', 'ftp://127.0.0.1/x']) {
+      await expectLater(
+          dio.getUri<String>(pinnedServer
+              .uri('localhost', '/redirect', {'code': '302', 'to': to})),
+          throwsA(isA<DioException>()
+              .having((e) => e.type, 'type', DioExceptionType.badResponse)),
+          reason: to);
+    }
+    dio.close();
+  });
 }

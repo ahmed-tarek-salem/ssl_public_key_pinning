@@ -12,7 +12,8 @@ import 'spki_extractor.dart';
 /// The pinning policy: which hosts are pinned to which SPKI pins, and the
 /// fail-closed decision procedure applied during TLS handshakes.
 ///
-/// Host matching is exact and case-insensitive, and ignores the port (the
+/// Host matching is exact and case-insensitive, treats the absolute FQDN
+/// form (`api.example.com.`) as the same host, and ignores the port (the
 /// same pins apply to 443 and 8443 - OkHttp semantics). A host with no
 /// pins is *rejected* by the pinned channel; routing bindings send such
 /// hosts through a normal CA-validated client instead.
@@ -23,8 +24,16 @@ class PublicKeyPinning {
   })  : _observer = observer,
         _pinsByHost = {
           for (final entry in pins.entries)
-            entry.key.toLowerCase(): _parsePins(entry.key, entry.value),
+            _hostKey(entry.key): _parsePins(entry.key, entry.value),
         };
+
+  // The trailing dot must be folded in: `api.example.com.` resolves to the
+  // same server, so a lookup that missed it would route that spelling
+  // around the pin check.
+  static String _hostKey(String host) {
+    final lower = host.toLowerCase();
+    return lower.endsWith('.') ? lower.substring(0, lower.length - 1) : lower;
+  }
 
   static List<PublicKeyPin> _parsePins(String host, List<String> raw) {
     if (raw.isEmpty) {
@@ -41,15 +50,14 @@ class PublicKeyPinning {
   final Map<String, PinningEvent> _lastRejection = {};
 
   /// Whether [host] has pins configured.
-  bool isPinned(String host) => _pinsByHost.containsKey(host.toLowerCase());
+  bool isPinned(String host) => _pinsByHost.containsKey(_hostKey(host));
 
   /// The most recent rejection event for [host], if any.
-  PinningEvent? lastRejectionFor(String host) =>
-      _lastRejection[host.toLowerCase()];
+  PinningEvent? lastRejectionFor(String host) => _lastRejection[_hostKey(host)];
 
   /// Sync pin check on raw certificate DER. Fail-closed on every error path.
   bool checkDer(Uint8List der, String host, int port) {
-    final key = host.toLowerCase();
+    final key = _hostKey(host);
     final pins = _pinsByHost[key];
     if (pins == null) {
       // Only pinned hosts are tracked in _lastRejection, so it stays

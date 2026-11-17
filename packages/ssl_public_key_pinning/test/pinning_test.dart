@@ -104,4 +104,30 @@ void main() {
     expect(c, isA<HttpClient>());
     c.close();
   });
+
+  test('trailing-dot FQDN form is the same pinned host', () {
+    final p = PublicKeyPinning(pins: {
+      'a.com': [correctPin],
+    });
+    expect(p.isPinned('a.com.'), isTrue);
+    expect(p.isPinned('A.COM.'), isTrue);
+    expect(p.checkDer(der, 'a.com.', 443), isTrue);
+  });
+
+  test('pins configured with a trailing dot match the plain host', () {
+    final p = PublicKeyPinning(pins: {
+      'a.com.': [correctPin],
+    });
+    expect(p.isPinned('a.com'), isTrue);
+    expect(p.checkDer(der, 'a.com', 443), isTrue);
+  });
+
+  test('rejection recorded under either host form is found by both', () {
+    final p = PublicKeyPinning(pins: {
+      'a.com': [wrongPin],
+    });
+    expect(p.checkDer(der, 'a.com.', 443), isFalse);
+    expect(p.lastRejectionFor('a.com'), isNotNull);
+    expect(p.lastRejectionFor('a.com.'), isNotNull);
+  });
 }

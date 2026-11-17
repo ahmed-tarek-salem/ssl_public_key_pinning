@@ -228,4 +228,47 @@ void main() {
     client.close();
     await plain.close(force: true);
   });
+
+  test('17. trailing-dot form of a pinned host is still pin-checked', () async {
+    final bad = clientWith([wrongPin]);
+    await expectLater(bad.get(pinnedServer.uri('localhost.', '/ok')),
+        throwsA(isA<PublicKeyPinningException>()));
+    bad.close();
+
+    final good = clientWith([correctPin]);
+    final res = await good.get(pinnedServer.uri('localhost.', '/ok'));
+    expect(res.body, 'ok');
+    good.close();
+  });
+
+  test('18. redirect to the trailing-dot form re-applies the pin', () async {
+    final target = pinnedServer.uri('localhost.', '/ok').toString();
+    final client = clientWith([wrongPin]);
+    await expectLater(
+        client.get(plainServer
+            .uri('127.0.0.1', '/redirect', {'code': '302', 'to': target})),
+        throwsA(isA<PublicKeyPinningException>()));
+    client.close();
+  });
+
+  test('19. malformed Location is a ClientException', () async {
+    final client = clientWith([correctPin]);
+    await expectLater(
+        client.get(pinnedServer.uri(
+            'localhost', '/redirect', {'code': '302', 'to': 'http://a:xx/'})),
+        throwsA(isA<http.ClientException>()));
+    client.close();
+  });
+
+  test('20. redirect to a non-http(s) scheme is refused', () async {
+    final client = clientWith([correctPin]);
+    for (final to in ['data:text/plain,hi', 'ftp://127.0.0.1/x']) {
+      await expectLater(
+          client.get(pinnedServer
+              .uri('localhost', '/redirect', {'code': '302', 'to': to})),
+          throwsA(isA<http.ClientException>()),
+          reason: to);
+    }
+    client.close();
+  });
 }

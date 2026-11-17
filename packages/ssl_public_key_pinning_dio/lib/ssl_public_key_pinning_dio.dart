@@ -131,7 +131,7 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
       hops++;
       await response.stream.drain<void>();
 
-      final next = url.resolveUri(Uri.parse(location));
+      final next = _resolveRedirect(options, url, location);
       redirects.add(RedirectRecord(response.statusCode, method, next));
       if ({301, 302, 303}.contains(response.statusCode) &&
           method != 'GET' &&
@@ -152,6 +152,28 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
       }
       url = next;
     }
+  }
+
+  Uri _resolveRedirect(RequestOptions options, Uri from, String location) {
+    final Uri next;
+    try {
+      next = from.resolveUri(Uri.parse(location));
+    } on FormatException catch (e) {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.badResponse,
+        error: e,
+        message: 'Invalid redirect Location header',
+      );
+    }
+    if (next.scheme != 'http' && next.scheme != 'https') {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.badResponse,
+        message: "Refusing redirect to unsupported scheme '${next.scheme}'",
+      );
+    }
+    return next;
   }
 
   @override
