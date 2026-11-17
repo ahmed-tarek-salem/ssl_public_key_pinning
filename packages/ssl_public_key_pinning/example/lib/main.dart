@@ -1,5 +1,9 @@
 import 'dart:io';
 
+// Flutter 3.47 deprecated this import in favour of package:material_ui,
+// which needs Flutter 3.47 or newer. Keeping it lets the example run on
+// older Flutter versions too.
+// ignore: deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:ssl_public_key_pinning/ssl_public_key_pinning.dart';
 
