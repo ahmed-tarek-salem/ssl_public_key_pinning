@@ -3,7 +3,7 @@ import 'dart:io';
 /// A local HTTPS server for integration tests. Routes:
 /// `/ok` → 200 `ok`; `/redirect?code=<n>&to=<url>` → redirect;
 /// `/echo-auth` → the `authorization` header or `none`;
-/// `/echo-method` → the request method.
+/// `/echo-method` → the request method; `/echo-body` → the request body.
 class TlsTestServer {
   TlsTestServer._(this._server);
 
@@ -45,6 +45,9 @@ class TlsTestServer {
         res.write(req.headers.value('cookie') ?? 'none');
       case '/echo-method':
         res.write(req.method);
+      case '/echo-body':
+        res.addStream(req).then((_) => res.close());
+        return;
       case '/redirect':
         final code = int.parse(req.uri.queryParameters['code'] ?? '302');
         res

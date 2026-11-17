@@ -1,6 +1,7 @@
 /// Dio binding for ssl_public_key_pinning: a routing [PublicKeyPinningAdapter].
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -27,7 +28,12 @@ const _sensitiveHeaders = {
 ///
 /// Redirects are resolved inside this adapter so every hop is re-routed -
 /// a redirect can never move a request across the pin boundary unchecked.
-/// Request bodies are buffered so 307/308 hops can retransmit them.
+///
+/// Request bodies stream straight to the network and are never buffered, so
+/// upload progress follows the transfer. On a 307 or 308, in-memory data
+/// (JSON, strings, bytes) is sent again. A [Stream] or [FormData] body can
+/// only be sent once, so for those the 307 or 308 response is returned
+/// as-is instead of being followed.
 class PublicKeyPinningAdapter implements HttpClientAdapter {
   factory PublicKeyPinningAdapter(
     PublicKeyPinning pinning, {
@@ -58,15 +64,26 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
-    // Buffer the body once so 307/308 hops can retransmit it.
-    Uint8List? body;
-    if (requestStream != null) {
-      final builder = BytesBuilder(copy: false);
-      await for (final chunk in requestStream) {
-        builder.add(chunk);
-      }
-      body = builder.takeBytes();
-    }
+    // Dio has already turned in-memory data into chunks it holds, so keeping
+    // references to them as they stream past costs no copy and lets a
+    // 307/308 send them again, once all of them have gone out. Stream and
+    // FormData bodies are one-shot.
+    final replayable = options.data is! Stream && options.data is! FormData;
+    final sentChunks = <Uint8List>[];
+    var fullySent = false;
+    var hasBody = requestStream != null;
+    Stream<Uint8List>? body = requestStream?.transform(
+      StreamTransformer.fromHandlers(
+        handleData: (chunk, sink) {
+          if (replayable) sentChunks.add(chunk);
+          sink.add(chunk);
+        },
+        handleDone: (sink) {
+          fullySent = true;
+          sink.close();
+        },
+      ),
+    );
 
     var url = options.uri;
     var method = options.method;
@@ -100,7 +117,7 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
       try {
         response = await (pinnedHop ? _pinned : _inner).fetch(
           hopOptions,
-          body == null ? null : Stream.value(body),
+          body,
           cancelFuture,
         );
       } on HandshakeException {
@@ -120,6 +137,14 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
         if (redirects.isNotEmpty) response.redirects = redirects;
         return response;
       }
+      final toGet = {301, 302, 303}.contains(response.statusCode) &&
+          method != 'GET' &&
+          method != 'HEAD';
+      if (!toGet && hasBody && !(replayable && fullySent)) {
+        // The next hop would need the body again and it cannot be rebuilt.
+        if (redirects.isNotEmpty) response.redirects = redirects;
+        return response;
+      }
       if (hops >= maxRedirects) {
         await response.stream.drain<void>();
         throw DioException(
@@ -133,11 +158,10 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
 
       final next = _resolveRedirect(options, url, location);
       redirects.add(RedirectRecord(response.statusCode, method, next));
-      if ({301, 302, 303}.contains(response.statusCode) &&
-          method != 'GET' &&
-          method != 'HEAD') {
+      if (toGet) {
         method = 'GET';
-        body = null;
+        hasBody = false;
+        sentChunks.clear();
         dropContentHeaders = true;
         headers = Map.of(headers)
           ..removeWhere((k, _) {
@@ -150,6 +174,7 @@ class PublicKeyPinningAdapter implements HttpClientAdapter {
         headers = Map.of(headers)
           ..removeWhere((k, _) => _sensitiveHeaders.contains(k.toLowerCase()));
       }
+      body = hasBody ? Stream.fromIterable(sentChunks) : null;
       url = next;
     }
   }

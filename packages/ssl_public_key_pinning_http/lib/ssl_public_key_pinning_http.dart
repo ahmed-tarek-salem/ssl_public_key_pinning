@@ -1,6 +1,7 @@
 /// package:http binding for ssl_public_key_pinning: a routing [PublicKeyPinningClient].
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -26,10 +27,13 @@ const _sensitiveHeaders = {
 /// all other requests go through [inner] with normal CA validation.
 ///
 /// Redirects are followed manually so every hop is re-routed - a redirect
-/// can never move a request across the pin boundary unchecked. Request
-/// bodies are buffered so 307/308 hops can retransmit them (streaming
-/// bodies are buffered too - the same trade-off OkHttp makes for
-/// retriable bodies).
+/// can never move a request across the pin boundary unchecked.
+///
+/// Request bodies stream straight to the network and are never buffered.
+/// On a 307 or 308 an [http.Request] is sent again from the bytes it already
+/// holds. A streamed body ([http.StreamedRequest], [http.MultipartRequest])
+/// can only be sent once, so for those the 307 or 308 response is returned
+/// to the caller instead of being followed.
 class PublicKeyPinningClient extends http.BaseClient {
   PublicKeyPinningClient(
     this._pinning, {
@@ -50,7 +54,15 @@ class PublicKeyPinningClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    var body = await request.finalize().toBytes();
+    final stream = request.finalize();
+    // An http.Request already holds its body in memory, so it can be sent
+    // again. Anything else streams a one-shot body on the first hop, and a
+    // later hop may only go without it once it is known to have been empty.
+    Uint8List? body = request is http.Request ? request.bodyBytes : null;
+    Stream<List<int>>? oneShot = body == null ? stream : null;
+    var oneShotPending = oneShot != null;
+    var oneShotBytes = 0;
+    var oneShotDone = false;
     var method = request.method;
     var url = request.url;
     final headers = Map<String, String>.of(request.headers);
@@ -58,9 +70,28 @@ class PublicKeyPinningClient extends http.BaseClient {
     var hops = 0;
 
     while (true) {
-      final hop = http.Request(method, url)
+      final http.BaseRequest hop;
+      if (oneShot != null) {
+        hop = _OneShotRequest(
+          method,
+          url,
+          oneShot.transform(StreamTransformer.fromHandlers(
+            handleData: (chunk, sink) {
+              oneShotBytes += chunk.length;
+              sink.add(chunk);
+            },
+            handleDone: (sink) {
+              oneShotDone = true;
+              sink.close();
+            },
+          )),
+        )..contentLength = request.contentLength;
+        oneShot = null;
+      } else {
+        hop = http.Request(method, url)..bodyBytes = body ?? Uint8List(0);
+      }
+      hop
         ..headers.addAll(headers)
-        ..bodyBytes = body
         ..followRedirects = false
         ..persistentConnection = request.persistentConnection;
 
@@ -80,6 +111,13 @@ class PublicKeyPinningClient extends http.BaseClient {
           !request.followRedirects) {
         return response;
       }
+      final toGet = {301, 302, 303}.contains(response.statusCode) &&
+          method != 'GET' &&
+          method != 'HEAD';
+      if (!toGet && oneShotPending && !(oneShotDone && oneShotBytes == 0)) {
+        // The next hop would need the streamed body again and it is gone.
+        return response;
+      }
       if (hops >= maxRedirects) {
         await response.stream.drain<void>();
         throw http.ClientException('Redirect limit exceeded', url);
@@ -88,11 +126,10 @@ class PublicKeyPinningClient extends http.BaseClient {
       await response.stream.drain<void>();
 
       final next = _resolveRedirect(url, location);
-      if ({301, 302, 303}.contains(response.statusCode) &&
-          method != 'GET' &&
-          method != 'HEAD') {
+      if (toGet) {
         method = 'GET';
-        body = Uint8List(0);
+        body = null;
+        oneShotPending = false;
         headers.removeWhere((k, _) {
           final key = k.toLowerCase();
           return key == 'content-length' || key == 'content-type';
@@ -125,5 +162,18 @@ class PublicKeyPinningClient extends http.BaseClient {
   void close() {
     _pinned.close();
     _inner.close();
+  }
+}
+
+/// Sends a body stream that can be read only once.
+class _OneShotRequest extends http.BaseRequest {
+  _OneShotRequest(super.method, super.url, this._body);
+
+  final Stream<List<int>> _body;
+
+  @override
+  http.ByteStream finalize() {
+    super.finalize();
+    return http.ByteStream(_body);
   }
 }

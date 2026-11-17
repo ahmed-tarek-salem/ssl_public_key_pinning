@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -271,4 +272,115 @@ void main() {
     }
     client.close();
   });
+
+  test('21. a streamed body reaches the server while it is still being sent',
+      () async {
+    final client = clientWith([correctPin]);
+    final before = pinnedServer.requestCount;
+    final req = http.StreamedRequest(
+        'POST', pinnedServer.uri('localhost', '/echo-body'));
+    final response = client.send(req);
+    req.sink.add(List.filled(64 * 1024, 65));
+    final reachedServer =
+        await eventually(() => pinnedServer.requestCount > before);
+    req.sink.add(List.filled(64 * 1024, 66));
+    await req.sink.close();
+    final res = await response;
+    expect(reachedServer, isTrue,
+        reason: 'the body must not be buffered before the request starts');
+    expect((await res.stream.toBytes()).length, 128 * 1024);
+    client.close();
+  });
+
+  test('22. 307 and 308 send an in-memory body again', () async {
+    final client = clientWith([correctPin]);
+    for (final code in ['307', '308']) {
+      final res = await client.post(
+          pinnedServer.uri(
+              'localhost', '/redirect', {'code': code, 'to': '/echo-body'}),
+          body: 'payload');
+      expect(res.body, 'payload', reason: code);
+    }
+    client.close();
+  });
+
+  test('23. 307 and 308 on a one-shot body return the redirect as-is',
+      () async {
+    final client = clientWith([correctPin]);
+    for (final code in ['307', '308']) {
+      final url = pinnedServer
+          .uri('localhost', '/redirect', {'code': code, 'to': '/echo-body'});
+      final streamed = http.StreamedRequest('POST', url);
+      final multipart = http.MultipartRequest('POST', url)
+        ..fields['field'] = 'value';
+      for (final req in [streamed, multipart]) {
+        final response = client.send(req);
+        if (req is http.StreamedRequest) {
+          req.sink.add(utf8.encode('payload'));
+          await req.sink.close();
+        }
+        final res = await response;
+        expect(res.statusCode, int.parse(code),
+            reason: '$code ${req.runtimeType}');
+        expect(res.headers['location'], '/echo-body');
+        await res.stream.drain<void>();
+      }
+    }
+    client.close();
+  });
+
+  test('24. 303 still follows a one-shot body, as a GET', () async {
+    final client = clientWith([correctPin]);
+    final req = http.MultipartRequest(
+        'POST',
+        pinnedServer.uri(
+            'localhost', '/redirect', {'code': '303', 'to': '/echo-method'}))
+      ..fields['field'] = 'value';
+    final res = await client.send(req);
+    expect(await res.stream.bytesToString(), 'GET');
+    client.close();
+  });
+
+  test('25. a streamed request with an empty body still follows redirects',
+      () async {
+    final client = clientWith([correctPin]);
+    final req = http.StreamedRequest(
+        'GET',
+        pinnedServer
+            .uri('localhost', '/redirect', {'code': '307', 'to': '/ok'}));
+    final response = client.send(req);
+    await req.sink.close();
+    final res = await response;
+    expect(await res.stream.bytesToString(), 'ok');
+    client.close();
+  });
+
+  test('26. a streamed body that was never read is not treated as empty',
+      () async {
+    final client = clientWith([correctPin], inner: _UnreadRedirectClient());
+    final req =
+        http.StreamedRequest('POST', Uri.parse('https://127.0.0.1:1/upload'));
+    final response = client.send(req);
+    req.sink.add(utf8.encode('payload'));
+    unawaited(req.sink.close());
+    final res = await response;
+    expect(res.statusCode, 307);
+    client.close();
+  });
+}
+
+/// Stands in for the inner client: answers 307 without reading the body.
+class _UnreadRedirectClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async =>
+      http.StreamedResponse(const Stream.empty(), 307,
+          headers: {'location': '/next'});
+}
+
+Future<bool> eventually(bool Function() condition) async {
+  for (var i = 0; i < 100; i++) {
+    if (condition()) return true;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+  return false;
 }
